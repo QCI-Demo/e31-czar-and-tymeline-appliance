@@ -1,0 +1,9 @@
+{
+  "target": "internal-portal",
+  "published_at": "2026-07-10T21:42:54Z",
+  "source": "docs/ci-cd",
+  "files": ["overview.md", "signing.md", "verification-checklist.md", "release-notes-template.md"],
+  "publication_url": "https://docs.internal.e31.local/ci-cd/overview",
+  "preview_index": "docs/portal-preview/ci-cd/index.html",
+  "status": "ok"
+}

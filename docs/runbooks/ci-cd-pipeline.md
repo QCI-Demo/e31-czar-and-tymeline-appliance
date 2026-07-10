@@ -1,5 +1,14 @@
 # E31 Substrate CI/CD Pipeline & Release Bundle
 
+> **Accreditation documentation (canonical):**
+> [Pipeline overview](../ci-cd/overview.md) ·
+> [Signing / SBOM / bundle](../ci-cd/signing.md) ·
+> [Verification checklist](../ci-cd/verification-checklist.md) ·
+> [Release notes template](../ci-cd/release-notes-template.md)
+>
+> **Internal portal:** https://docs.internal.e31.local/ci-cd/overview  
+> Published via `DOCS_TARGET=internal-portal ./scripts/publish-docs.sh`
+
 ## Overview
 
 This pipeline builds the JetPack 7.2 base image, containerizes all seven E31
