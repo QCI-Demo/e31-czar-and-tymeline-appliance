@@ -1,0 +1,99 @@
+global:
+  imageRegistry: e31.local:5000
+  imageTag: v1
+  namespace: e31-substrate
+  pullPolicy: IfNotPresent
+  nvidiaRuntime: nvidia
+
+memory:
+  enabled: true
+  replicaCount: 1
+  image:
+    repository: memory
+    tag: v1
+    digest: "sha256:1959b07716b0bbcecdad7e413bee6ca1f715b2247822b7ad762c58fed046dff0"
+  service:
+    port: 8080
+  resources:
+    limits:
+      nvidia.com/gpu: 1
+
+retrieval:
+  enabled: true
+  replicaCount: 1
+  image:
+    repository: retrieval
+    tag: v1
+    digest: "sha256:db6f692c0b5266a8ce261ab7bce17441bbb568dee4c07b55ee8c3f0035106b98"
+  service:
+    port: 8081
+  env:
+    vectorStorePath: /data/vectors
+  resources:
+    limits:
+      nvidia.com/gpu: 1
+
+inference:
+  enabled: true
+  replicaCount: 1
+  image:
+    repository: inference
+    tag: v1
+    digest: "sha256:5e76b08c06e8871b8ce3fc652183d4ecd76b46f7cdd7ff6c110a6fa4a2fa41c6"
+  service:
+    port: 8082
+  resources:
+    limits:
+      nvidia.com/gpu: 1
+
+fineTuning:
+  enabled: true
+  replicaCount: 1
+  image:
+    repository: fine-tuning
+    tag: v1
+    digest: "sha256:688be26c762575fdae3088bc6ef75c487253584522b8a9a754c1e151dc20518f"
+  service:
+    port: 8083
+  resources:
+    limits:
+      nvidia.com/gpu: 1
+
+eval:
+  enabled: true
+  replicaCount: 1
+  image:
+    repository: eval
+    tag: v1
+    digest: "sha256:f9943db7589d7e5b9c6da3622327beefa1617ffd90d505fbd4c091b8536caedd"
+  service:
+    port: 8084
+  resources:
+    limits:
+      nvidia.com/gpu: 1
+
+watchman:
+  enabled: true
+  replicaCount: 1
+  image:
+    repository: watchman
+    tag: v1
+    digest: "sha256:1d1d2937381c6f2dd1a6f6b9e3abb82a51369a966d806ca3e862ad13fb817c57"
+  service:
+    port: 9090
+  resources:
+    limits:
+      nvidia.com/gpu: 1
+
+localBridge:
+  enabled: true
+  replicaCount: 1
+  image:
+    repository: local-bridge
+    tag: v1
+    digest: "sha256:08e75570919bf2b674d4688ba8c225c5aaa1196b44bad0038d9d07b23537bca2"
+  service:
+    port: 8443
+  resources:
+    limits:
+      nvidia.com/gpu: 1

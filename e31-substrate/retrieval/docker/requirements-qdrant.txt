@@ -1,0 +1,4 @@
+# Qdrant client libraries for the Retrieval service.
+# Included in requirements.txt for the container build; kept here for
+# native Jetson installs that only need the vector-store client.
+qdrant-client>=1.7.0
