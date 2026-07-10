@@ -1,0 +1,6 @@
+apiVersion: v2
+name: e31-substrate
+description: E31 substrate services for sealed Jetson AGX Thor appliance
+type: application
+version: 0.1.0
+appVersion: "1.0.0"

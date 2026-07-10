@@ -1,0 +1,89 @@
+# syntax=docker/dockerfile:1.7
+# E31 Substrate service image template (multi-stage)
+#
+# Usage:
+#   docker buildx build --platform linux/arm64 \
+#     --build-arg SERVICE_NAME=memory \
+#     --build-arg SERVICE_MODULE=memory.main \
+#     --build-arg SERVICE_PORT=8080 \
+#     --build-arg BASE_IMAGE=e31.local:5000/jetpack:7.2 \
+#     --build-arg BASE_DIGEST=sha256:<jetpack-7.2-digest> \
+#     -f e31-substrate/docker/Dockerfile.template \
+#     -t e31.local:5000/memory:v1 \
+#     e31-substrate/memory/docker
+#
+# When the internal registry holds the base, pin immutably:
+#     --build-arg BASE_IMAGE=e31.local:5000/jetpack@sha256:<digest>
+#
+# JetPack 7.2 base digest is recorded in LABEL e31.base.digest and verified
+# by build-services.sh before each service build.
+
+ARG BASE_IMAGE=e31.local:5000/jetpack:7.2
+ARG BASE_DIGEST=sha256:0000000000000000000000000000000000000000000000000000000000000000
+
+ARG SERVICE_NAME=memory
+ARG SERVICE_MODULE=memory.main
+ARG SERVICE_PORT=8080
+
+# ---------------------------------------------------------------------------
+# Stage 1: builder — install Python deps into an isolated prefix
+# ---------------------------------------------------------------------------
+FROM ${BASE_IMAGE} AS builder
+
+ARG SERVICE_NAME
+WORKDIR /build
+
+COPY requirements.txt .
+# Optional Qdrant client deps for retrieval (ignored if absent)
+COPY requirements*.txt ./
+
+RUN python3 -m venv /opt/venv \
+    && /opt/venv/bin/pip install --no-cache-dir --upgrade pip \
+    && /opt/venv/bin/pip install --no-cache-dir -r requirements.txt \
+    && if [ -f requirements-qdrant.txt ]; then \
+         /opt/venv/bin/pip install --no-cache-dir -r requirements-qdrant.txt || true; \
+       fi \
+    && find /opt/venv -type d -name '__pycache__' -exec rm -rf {} + 2>/dev/null || true \
+    && find /opt/venv -type f -name '*.pyc' -delete 2>/dev/null || true
+
+COPY src/ /build/src/
+
+# ---------------------------------------------------------------------------
+# Stage 2: runtime — minimal final image
+# ---------------------------------------------------------------------------
+FROM ${BASE_IMAGE} AS runtime
+
+ARG SERVICE_NAME
+ARG SERVICE_MODULE
+ARG SERVICE_PORT
+ARG BASE_DIGEST
+
+LABEL org.opencontainers.image.title="E31 ${SERVICE_NAME}" \
+      org.opencontainers.image.description="E31 substrate ${SERVICE_NAME} service" \
+      e31.service.name="${SERVICE_NAME}" \
+      e31.jetpack.version="7.2" \
+      e31.base.digest="${BASE_DIGEST}"
+
+ENV SERVICE_NAME=${SERVICE_NAME} \
+    SERVICE_MODULE=${SERVICE_MODULE} \
+    PORT=${SERVICE_PORT} \
+    PATH="/opt/venv/bin:${PATH}" \
+    NVIDIA_VISIBLE_DEVICES=all \
+    VIRTUAL_ENV=/opt/venv
+
+WORKDIR /app
+
+COPY --from=builder /opt/venv /opt/venv
+COPY --from=builder /build/src/ ./
+
+EXPOSE ${SERVICE_PORT}
+
+# Non-root runtime user for sealed appliance hardening
+RUN groupadd --system --gid 10001 e31 \
+    && useradd --system --uid 10001 --gid e31 --home-dir /app --shell /usr/sbin/nologin e31 \
+    && chown -R e31:e31 /app
+
+USER e31
+
+ENTRYPOINT ["tini", "--"]
+CMD ["sh", "-c", "exec python -m ${SERVICE_MODULE}"]

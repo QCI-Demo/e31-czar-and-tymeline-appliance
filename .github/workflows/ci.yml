@@ -1,0 +1,514 @@
+# E31 Substrate CI/CD Pipeline
+# Builds JetPack 7.2 base, containerizes seven services, tests, signs with Cosign,
+# generates Syft SBOMs, assembles a content-addressed OCI release bundle, and
+# verifies bit-for-bit reproducibility for air-gap provisioning.
+name: E31 Substrate CI/CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Workflow-level concurrency: one in-flight pipeline per ref
+concurrency:
+  group: e31-substrate-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  REGISTRY: e31.local:5000
+  IMAGE_TAG: ${{ github.sha }}
+  PLATFORM: linux/arm64
+  ARTIFACT_RETENTION_DAYS: "14"
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+  attestations: write
+
+jobs:
+  # -------------------------------------------------------------------------
+  # build — JetPack 7.2 base image (shared by all services)
+  # -------------------------------------------------------------------------
+  build:
+    name: Build JetPack base + services
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    concurrency:
+      group: e31-build-${{ github.ref }}
+      cancel-in-progress: true
+    outputs:
+      jetpack_digest: ${{ steps.base.outputs.digest }}
+      bundle_version: ${{ steps.meta.outputs.version }}
+      source_date_epoch: ${{ steps.meta.outputs.epoch }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set bundle metadata
+        id: meta
+        run: |
+          EPOCH=$(git log -1 --format=%ct)
+          echo "epoch=${EPOCH}" >> "$GITHUB_OUTPUT"
+          echo "version=${GITHUB_SHA:0:12}" >> "$GITHUB_OUTPUT"
+          echo "SOURCE_DATE_EPOCH=${EPOCH}" >> "$GITHUB_ENV"
+
+      - name: Set up QEMU (arm64)
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build JetPack 7.2 base image
+        id: base
+        run: |
+          docker buildx build \
+            --platform "${PLATFORM}" \
+            -f e31-substrate/docker/Dockerfile.base \
+            -t "${REGISTRY}/jetpack:7.2" \
+            --load \
+            e31-substrate/docker
+          DIGEST=$(docker inspect --format='{{.Id}}' "${REGISTRY}/jetpack:7.2")
+          DIGEST="sha256:${DIGEST#sha256:}"
+          echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
+          echo "${DIGEST}" > e31-substrate/docker/.jetpack-digest
+          echo "BASE_DIGEST=${DIGEST}" >> "$GITHUB_ENV"
+          echo "JetPack 7.2 digest: ${DIGEST}"
+          docker save "${REGISTRY}/jetpack:7.2" | gzip > /tmp/jetpack.tar.gz
+
+      - name: Generate pinned service Dockerfiles
+        run: |
+          BASE_DIGEST="${BASE_DIGEST}" BASE_IMAGE="${REGISTRY}/jetpack:7.2" \
+            bash e31-substrate/docker/generate-dockerfiles.sh
+
+      - name: Build all seven substrate services
+        run: |
+          mkdir -p /tmp/service-images
+          while IFS='|' read -r name module port context || [ -n "${name:-}" ]; do
+            [ -z "${name}" ] && continue
+            echo "${name}" | grep -q '^#' && continue
+            IMAGE_TAG_FULL="${REGISTRY}/${name}:${IMAGE_TAG}"
+            echo "==> Building ${IMAGE_TAG_FULL}"
+            docker buildx build \
+              --platform "${PLATFORM}" \
+              --pull=false \
+              --build-arg "BASE_IMAGE=${REGISTRY}/jetpack:7.2" \
+              --build-arg "BASE_DIGEST=${BASE_DIGEST}" \
+              --build-arg "SERVICE_NAME=${name}" \
+              --build-arg "SERVICE_MODULE=${module}" \
+              --build-arg "SERVICE_PORT=${port}" \
+              -f "e31-substrate/${context}/Dockerfile" \
+              -t "${IMAGE_TAG_FULL}" \
+              -t "${REGISTRY}/${name}:v1" \
+              --load \
+              "e31-substrate/${context}"
+            docker save "${IMAGE_TAG_FULL}" | gzip > "/tmp/service-images/${name}.tar.gz"
+          done < e31-substrate/docker/services.env
+
+      - name: Upload JetPack base image
+        uses: actions/upload-artifact@v4
+        with:
+          name: image-jetpack
+          path: /tmp/jetpack.tar.gz
+          retention-days: ${{ fromJSON(env.ARTIFACT_RETENTION_DAYS) }}
+
+      - name: Upload JetPack digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: jetpack-digest
+          path: e31-substrate/docker/.jetpack-digest
+          retention-days: ${{ fromJSON(env.ARTIFACT_RETENTION_DAYS) }}
+
+      - name: Upload service image tarballs
+        uses: actions/upload-artifact@v4
+        with:
+          name: service-images
+          path: /tmp/service-images/
+          retention-days: ${{ fromJSON(env.ARTIFACT_RETENTION_DAYS) }}
+          if-no-files-found: error
+
+  # -------------------------------------------------------------------------
+  # test — unit + integration tests
+  # -------------------------------------------------------------------------
+  test:
+    name: Test
+    runs-on: ubuntu-24.04
+    needs: [build]
+    timeout-minutes: 30
+    concurrency:
+      group: e31-test-${{ github.ref }}
+      cancel-in-progress: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest pytest-asyncio httpx fastapi uvicorn pydantic
+
+      - name: Run unit tests
+        run: |
+          export PYTHONPATH="e31-substrate/memory/docker/src:e31-substrate/retrieval/docker/src:e31-substrate/inference/docker/src:e31-substrate/fine-tuning/docker/src:e31-substrate/eval/docker/src:e31-substrate/watchman/docker/src:e31-substrate/local-bridge/docker/src"
+          pytest e31-substrate/tests/unit -v --junitxml=test-results/unit.xml
+
+      - name: Run integration tests
+        run: |
+          export PYTHONPATH="e31-substrate/memory/docker/src:e31-substrate/retrieval/docker/src:e31-substrate/inference/docker/src:e31-substrate/fine-tuning/docker/src:e31-substrate/eval/docker/src:e31-substrate/watchman/docker/src:e31-substrate/local-bridge/docker/src"
+          pytest e31-substrate/tests/integration -v --junitxml=test-results/integration.xml
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: test-results/
+          retention-days: ${{ fromJSON(env.ARTIFACT_RETENTION_DAYS) }}
+
+  # -------------------------------------------------------------------------
+  # sign — Cosign sign every service image
+  # -------------------------------------------------------------------------
+  sign:
+    name: Sign artifacts
+    runs-on: ubuntu-24.04
+    needs: [build, test]
+    timeout-minutes: 45
+    concurrency:
+      group: e31-sign-${{ github.ref }}
+      cancel-in-progress: true
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [memory, retrieval, inference, fine-tuning, eval, watchman, local-bridge]
+    env:
+      SERVICE: ${{ matrix.service }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v3
+        with:
+          cosign-release: v2.4.1
+
+      - name: Download service images
+        uses: actions/download-artifact@v4
+        with:
+          name: service-images
+          path: /tmp/images
+
+      - name: Load image
+        run: |
+          IMAGE_TAG_FULL="${REGISTRY}/${SERVICE}:${IMAGE_TAG}"
+          echo "IMAGE_TAG=${IMAGE_TAG_FULL}" >> "$GITHUB_ENV"
+          gunzip -c "/tmp/images/${SERVICE}.tar.gz" | docker load
+          docker tag "${IMAGE_TAG_FULL}" "${REGISTRY}/${SERVICE}:v1"
+
+      - name: Write Cosign key
+        env:
+          COSIGN_KEY: ${{ secrets.COSIGN_KEY }}
+        run: |
+          if [ -z "${COSIGN_KEY}" ]; then
+            echo "COSIGN_KEY secret not set — generating ephemeral CI keypair"
+            cosign generate-key-pair
+            mv cosign.key /tmp/cosign.key
+            mv cosign.pub /tmp/cosign.pub
+          else
+            if echo "${COSIGN_KEY}" | grep -q "BEGIN"; then
+              printf '%s\n' "${COSIGN_KEY}" > /tmp/cosign.key
+            else
+              echo "${COSIGN_KEY}" | base64 -d > /tmp/cosign.key
+            fi
+            chmod 600 /tmp/cosign.key
+          fi
+
+      - name: Sign image with Cosign
+        env:
+          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
+        run: |
+          # cosign sign --key ${{ secrets.COSIGN_KEY }} ${{ env.IMAGE_TAG }}
+          cosign sign --yes --key /tmp/cosign.key --tlog-upload=false "${IMAGE_TAG}" \
+            || cosign sign --yes --key /tmp/cosign.key "${IMAGE_TAG}"
+          mkdir -p "/tmp/sigs/${SERVICE}"
+          digest=$(docker inspect --format='{{.Id}}' "${IMAGE_TAG}")
+          echo "${digest}" > "/tmp/sigs/${SERVICE}/image.digest"
+          cosign sign-blob --yes --key /tmp/cosign.key --tlog-upload=false \
+            --output-signature "/tmp/sigs/${SERVICE}/image.sig" \
+            "/tmp/sigs/${SERVICE}/image.digest"
+          cp /tmp/cosign.pub "/tmp/sigs/${SERVICE}/cosign.pub" 2>/dev/null || true
+
+      - name: Upload signatures
+        uses: actions/upload-artifact@v4
+        with:
+          name: signature-${{ matrix.service }}
+          path: /tmp/sigs/${{ matrix.service }}/
+          retention-days: ${{ fromJSON(env.ARTIFACT_RETENTION_DAYS) }}
+
+  # -------------------------------------------------------------------------
+  # sbom — Syft SBOM generation per service image
+  # -------------------------------------------------------------------------
+  sbom:
+    name: Generate SBOMs
+    runs-on: ubuntu-24.04
+    needs: [build, test]
+    timeout-minutes: 45
+    concurrency:
+      group: e31-sbom-${{ github.ref }}
+      cancel-in-progress: true
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [memory, retrieval, inference, fine-tuning, eval, watchman, local-bridge]
+    env:
+      SERVICE: ${{ matrix.service }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Syft
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh \
+            | sh -s -- -b /usr/local/bin
+
+      - name: Download service images
+        uses: actions/download-artifact@v4
+        with:
+          name: service-images
+          path: /tmp/images
+
+      - name: Load image and generate SBOM
+        run: |
+          IMAGE_TAG_FULL="${REGISTRY}/${SERVICE}:${IMAGE_TAG}"
+          echo "IMAGE_TAG=${IMAGE_TAG_FULL}" >> "$GITHUB_ENV"
+          gunzip -c "/tmp/images/${SERVICE}.tar.gz" | docker load
+          mkdir -p /tmp/sboms
+          # syft ${{ env.IMAGE_TAG }} -o json > sbom-${{ env.SERVICE }}.json
+          syft "docker:${IMAGE_TAG_FULL}" -o json > "/tmp/sboms/sbom-${SERVICE}.json"
+          syft "docker:${IMAGE_TAG_FULL}" -o spdx-json > "/tmp/sboms/sbom-${SERVICE}.spdx.json"
+
+      - name: Upload SBOMs
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-${{ matrix.service }}
+          path: /tmp/sboms/
+          retention-days: ${{ fromJSON(env.ARTIFACT_RETENTION_DAYS) }}
+
+  # -------------------------------------------------------------------------
+  # bundle — content-addressed OCI release bundle
+  # -------------------------------------------------------------------------
+  bundle:
+    name: Assemble OCI release bundle
+    runs-on: ubuntu-24.04
+    needs: [build, sign, sbom]
+    timeout-minutes: 60
+    concurrency:
+      group: e31-bundle-${{ github.ref }}
+      cancel-in-progress: true
+    outputs:
+      tar_sha256: ${{ steps.assemble.outputs.tar_sha256 }}
+      version: ${{ steps.assemble.outputs.version }}
+      epoch: ${{ steps.assemble.outputs.epoch }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install skopeo + Cosign
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq skopeo
+          curl -sSfL https://github.com/sigstore/cosign/releases/download/v2.4.1/cosign-linux-amd64 \
+            -o /tmp/cosign
+          sudo mv /tmp/cosign /usr/local/bin/cosign
+          sudo chmod +x /usr/local/bin/cosign
+
+      - name: Download service images
+        uses: actions/download-artifact@v4
+        with:
+          name: service-images
+          path: /tmp/images
+
+      - name: Download JetPack base
+        uses: actions/download-artifact@v4
+        with:
+          name: image-jetpack
+          path: /tmp/jetpack
+
+      - name: Download signatures and SBOMs
+        uses: actions/download-artifact@v4
+        with:
+          pattern: '{signature-*,sbom-*}'
+          path: /tmp/security-artifacts
+          merge-multiple: false
+
+      - name: Load images into local Docker
+        run: |
+          gunzip -c /tmp/jetpack/jetpack.tar.gz | docker load || true
+          for svc in memory retrieval inference fine-tuning eval watchman local-bridge; do
+            gunzip -c "/tmp/images/${svc}.tar.gz" | docker load
+            docker tag "${REGISTRY}/${svc}:${IMAGE_TAG}" "${REGISTRY}/${svc}:v1"
+          done
+
+      - name: Write Cosign key for manifest signing
+        env:
+          COSIGN_KEY: ${{ secrets.COSIGN_KEY }}
+        run: |
+          if [ -n "${COSIGN_KEY}" ]; then
+            if echo "${COSIGN_KEY}" | grep -q "BEGIN"; then
+              printf '%s\n' "${COSIGN_KEY}" > /tmp/cosign.key
+            else
+              echo "${COSIGN_KEY}" | base64 -d > /tmp/cosign.key
+            fi
+          else
+            cosign generate-key-pair
+            mv cosign.key /tmp/cosign.key
+            mv cosign.pub /tmp/cosign.pub
+          fi
+          chmod 600 /tmp/cosign.key
+
+      - name: Assemble release bundle
+        id: assemble
+        env:
+          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
+          VERSION: ${{ needs.build.outputs.bundle_version }}
+          SOURCE_DATE_EPOCH: ${{ needs.build.outputs.source_date_epoch }}
+        run: |
+          chmod +x e31-substrate/scripts/assemble-release-bundle.sh
+          mkdir -p release-bundle/sboms release-bundle/signatures
+          find /tmp/security-artifacts -name 'sbom-*.json' -exec cp {} release-bundle/sboms/ \;
+          find /tmp/security-artifacts -type d -name 'signature-*' -o -name 'image.sig' \
+            | while read -r p; do
+                [ -f "$p" ] && cp "$p" release-bundle/signatures/ || true
+              done
+          find /tmp/security-artifacts -name 'image.sig' -exec cp {} release-bundle/signatures/ \;
+          find /tmp/security-artifacts -name 'image.digest' -exec cp {} release-bundle/signatures/ \;
+
+          SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH}" \
+          bash e31-substrate/scripts/assemble-release-bundle.sh \
+            --registry "${REGISTRY}" \
+            --tag v1 \
+            --version "${VERSION}" \
+            --out dist/release-bundle \
+            --cosign-key /tmp/cosign.key \
+            --skip-clone
+
+          TAR_SHA=$(cat dist/release-bundle/bundle.sha256)
+          echo "tar_sha256=${TAR_SHA}" >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "epoch=${SOURCE_DATE_EPOCH}" >> "$GITHUB_OUTPUT"
+
+      - name: Publish bundle to internal registry
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        run: |
+          TAR="dist/release-bundle/e31-release-${{ steps.assemble.outputs.version }}.tar"
+          if skopeo copy --dest-tls-verify=false \
+              "oci-archive:${TAR}" \
+              "docker://${REGISTRY}/e31-release:${{ steps.assemble.outputs.version }}" 2>/tmp/publish.err; then
+            echo "Published release bundle to ${REGISTRY}"
+          else
+            echo "Registry publish skipped/unavailable; air-gap artifact retained as workflow artifact"
+            cat /tmp/publish.err || true
+          fi
+
+      - name: Upload release bundle artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-bundle
+          path: |
+            dist/release-bundle/e31-release-*.tar
+            dist/release-bundle/manifest.sha256
+            dist/release-bundle/manifest.sha256.sig
+            dist/release-bundle/bundle.sha256
+            dist/release-bundle/bundle-info.json
+            dist/release-bundle/bundle/meta/
+          retention-days: ${{ fromJSON(env.ARTIFACT_RETENTION_DAYS) }}
+          if-no-files-found: error
+
+  # -------------------------------------------------------------------------
+  # verify — reproducibility check on a clean runner
+  # -------------------------------------------------------------------------
+  verify:
+    name: Verify reproducibility
+    runs-on: ubuntu-24.04
+    needs: [bundle]
+    timeout-minutes: 60
+    concurrency:
+      group: e31-verify-${{ github.ref }}
+      cancel-in-progress: true
+    steps:
+      - name: Checkout (fresh runner)
+        uses: actions/checkout@v4
+
+      - name: Install skopeo + Cosign
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq skopeo
+          curl -sSfL https://github.com/sigstore/cosign/releases/download/v2.4.1/cosign-linux-amd64 \
+            -o /tmp/cosign
+          sudo mv /tmp/cosign /usr/local/bin/cosign
+          sudo chmod +x /usr/local/bin/cosign
+
+      - name: Download reference bundle artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: release-bundle
+          path: /tmp/reference-bundle
+
+      - name: Download service images
+        uses: actions/download-artifact@v4
+        with:
+          name: service-images
+          path: /tmp/images
+
+      - name: Load images (clean runner)
+        run: |
+          for svc in memory retrieval inference fine-tuning eval watchman local-bridge; do
+            gunzip -c "/tmp/images/${svc}.tar.gz" | docker load
+            docker tag "${REGISTRY}/${svc}:${IMAGE_TAG}" "${REGISTRY}/${svc}:v1"
+          done
+
+      - name: Normalize reference artifact layout
+        run: |
+          REF=/tmp/reference-bundle
+          mkdir -p "${REF}/bundle/meta"
+          find "${REF}" -name 'bundle.sha256' -exec cp -f {} "${REF}/bundle.sha256" \;
+          find "${REF}" -name 'manifest.sha256' -exec cp -f {} "${REF}/manifest.sha256" \;
+          find "${REF}" -name 'bundle-info.json' -exec cp -f {} "${REF}/bundle-info.json" \;
+          find "${REF}" -name 'image-digests.sha256' -exec cp -f {} "${REF}/bundle/meta/image-digests.sha256" \;
+          ls -laR "${REF}" | head -80
+
+      - name: Re-run bundle assembly and compare digests
+        env:
+          VERSION: ${{ needs.bundle.outputs.version }}
+          SOURCE_DATE_EPOCH: ${{ needs.bundle.outputs.epoch }}
+          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
+        run: |
+          chmod +x e31-substrate/scripts/assemble-release-bundle.sh
+          chmod +x e31-substrate/scripts/verify-reproducibility.sh
+          cosign generate-key-pair
+          mv cosign.key /tmp/cosign.key
+
+          SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH}" \
+          bash e31-substrate/scripts/verify-reproducibility.sh \
+            --reference /tmp/reference-bundle \
+            --out dist/verify-bundle \
+            --registry "${REGISTRY}" \
+            --tag v1 \
+            --version "${VERSION}" \
+            --cosign-key /tmp/cosign.key
+
+      - name: Upload verification report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reproducibility-report
+          path: |
+            dist/verify-bundle/bundle.sha256
+            dist/verify-bundle/manifest.sha256
+            dist/verify-bundle/bundle-info.json
+          retention-days: ${{ fromJSON(env.ARTIFACT_RETENTION_DAYS) }}

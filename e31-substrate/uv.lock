@@ -1,0 +1,41 @@
+version = 1
+requires-python = ">=3.12"
+resolution-markers = ["python_full_version >= '3.12'"]
+
+[[package]]
+name = "e31-substrate"
+version = "1.0.0"
+source = { virtual = "." }
+
+[manifest]
+members = ["memory", "retrieval", "inference", "fine-tuning", "eval", "watchman", "local-bridge"]
+
+[[package]]
+name = "fastapi"
+version = "0.115.6"
+source = { registry = "https://pypi.org/simple" }
+
+[[package]]
+name = "uvicorn"
+version = "0.34.0"
+source = { registry = "https://pypi.org/simple" }
+
+[[package]]
+name = "pydantic"
+version = "2.10.4"
+source = { registry = "https://pypi.org/simple" }
+
+[[package]]
+name = "httpx"
+version = "0.28.1"
+source = { registry = "https://pypi.org/simple" }
+
+[[package]]
+name = "structlog"
+version = "24.4.0"
+source = { registry = "https://pypi.org/simple" }
+
+[[package]]
+name = "prometheus-client"
+version = "0.21.1"
+source = { registry = "https://pypi.org/simple" }

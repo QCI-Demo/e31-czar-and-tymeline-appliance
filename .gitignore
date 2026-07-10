@@ -11,3 +11,15 @@ dist/
 build/
 .idea/
 *.log
+
+# CI / release artifacts
+dist/
+e31-substrate/docker/.jetpack-digest
+*.tar
+*.tar.gz
+cosign.key
+cosign.pub
+test-results/
+__pycache__/
+*.pyc
+.pytest_cache/

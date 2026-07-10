@@ -1,0 +1,3 @@
+# Qdrant client libraries — installed on native Jetson builds where prebuilt
+# aarch64 grpcio wheels are available. Cross-build CI uses requirements.txt.
+qdrant-client>=1.7.0

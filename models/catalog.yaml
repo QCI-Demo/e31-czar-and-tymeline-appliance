@@ -1,0 +1,14 @@
+# Model weight directories for the E31 open-weight catalog.
+# Actual weights are provisioned into the release bundle at assemble time.
+# Placeholders keep the content-addressed layout stable for CI.
+
+catalog:
+  - name: Qwen3.6-35B-A3B
+    path: qwen3.6-35b-a3b
+    format: safetensors
+  - name: gpt-oss
+    path: gpt-oss
+    format: safetensors
+  - name: bge-m3
+    path: bge-m3
+    format: onnx

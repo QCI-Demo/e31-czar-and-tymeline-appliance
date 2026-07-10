@@ -1,0 +1,48 @@
+# syntax=docker/dockerfile:1.7
+# E31 JetPack 7.2 base image (Ubuntu 24.04 / L4T r38.2.0 compatible)
+# Built once in CI, then pinned by digest for all substrate service images.
+#
+# Internal tag: e31.local:5000/jetpack:7.2
+# NGC reference (air-gap mirror): nvcr.io/nvidia/l4t-jetpack:r38.2.0
+
+ARG UBUNTU_IMAGE=ubuntu
+ARG UBUNTU_TAG=24.04
+# ubuntu:24.04@sha256 pinned for reproducible base layers
+ARG UBUNTU_DIGEST=sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90
+
+FROM ${UBUNTU_IMAGE}:${UBUNTU_TAG}@${UBUNTU_DIGEST}
+
+LABEL org.opencontainers.image.title="E31 JetPack 7.2 Base" \
+      org.opencontainers.image.description="Jetson-compatible JetPack 7.2 / Ubuntu 24.04 base for E31 substrate" \
+      org.opencontainers.image.vendor="E31" \
+      e31.jetpack.version="7.2" \
+      e31.l4t.version="r38.2.0" \
+      e31.ubuntu.version="24.04"
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    NVIDIA_VISIBLE_DEVICES=all \
+    NVIDIA_DRIVER_CAPABILITIES=compute,utility,video \
+    LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+# Jetson-compatible runtime toolchain (Python 3.12 on Ubuntu 24.04)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        python3 \
+        python3-pip \
+        python3-venv \
+        python3-dev \
+        libgomp1 \
+        tini \
+    && ln -sf /usr/bin/python3 /usr/bin/python \
+    && python3 -m pip install --break-system-packages --no-cache-dir --ignore-installed \
+         pip setuptools wheel \
+    && rm -rf /var/lib/apt/lists/* /root/.cache
+
+WORKDIR /opt/e31
+
+ENTRYPOINT ["/usr/bin/tini", "--"]
+CMD ["bash"]
